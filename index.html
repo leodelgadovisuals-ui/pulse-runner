@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Pulse Runner</title>
+<style>
+  :root {
+    --bg-top: #0a0e1a;
+    --bg-bottom: #050609;
+    --cyan: #4deeea;
+    --magenta: #f637ec;
+    --gold: #ffd166;
+    --text: #e9f6ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: var(--bg-bottom);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--text);
+    touch-action: none;
+    user-select: none;
+  }
+  #wrap {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  #hud {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 18px 22px;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+  }
+  #score {
+    font-size: clamp(20px, 4vw, 30px);
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-shadow: 0 0 12px rgba(77,238,234,0.55);
+  }
+  #best {
+    font-size: clamp(13px, 2.6vw, 16px);
+    opacity: 0.65;
+    text-align: right;
+  }
+  #combo {
+    position: absolute;
+    top: 60px; left: 22px;
+    font-size: clamp(12px, 2.4vw, 15px);
+    color: var(--gold);
+    text-shadow: 0 0 10px rgba(255,209,102,0.6);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 14px;
+    background: radial-gradient(ellipse at 50% 40%, rgba(15,20,35,0.55), rgba(4,5,9,0.86));
+    transition: opacity 0.35s ease;
+    pointer-events: none;
+  }
+  #overlay.hidden {
+    opacity: 0;
+  }
+  #title {
+    font-size: clamp(34px, 9vw, 56px);
+    font-weight: 800;
+    letter-spacing: 1px;
+    background: linear-gradient(90deg, var(--cyan), var(--magenta));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 0 40px rgba(77,238,234,0.25);
+  }
+  #subtitle {
+    font-size: clamp(14px, 3.2vw, 18px);
+    opacity: 0.85;
+    max-width: 380px;
+    line-height: 1.5;
+  }
+  #subtitle b { color: var(--cyan); }
+  #finalScore {
+    font-size: clamp(15px, 3.4vw, 19px);
+    opacity: 0.9;
+    min-height: 1.4em;
+  }
+  #hint {
+    margin-top: 6px;
+    font-size: clamp(12px, 2.6vw, 14px);
+    opacity: 0.5;
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.8; }
+  }
+  #footer {
+    position: absolute;
+    bottom: 10px;
+    width: 100%;
+    text-align: center;
+    font-size: 11px;
+    opacity: 0.35;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div id="hud">
+    <div id="score">0</div>
+    <div id="best">BEST 0</div>
+  </div>
+  <div id="combo"></div>
+  <div id="overlay">
+    <div id="title">PULSE RUNNER</div>
+    <div id="subtitle">Hold to charge your jump, release to leap.<br>Clear the spikes. Grab the <b>orbs</b> for combo score.</div>
+    <div id="finalScore"></div>
+    <div id="hint">TAP OR PRESS SPACE TO START</div>
+  </div>
+  <div id="footer">built to show what one person + AI can ship in an afternoon</div>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const comboEl = document.getElementById('combo');
+  const overlay = document.getElementById('overlay');
+  const subtitleEl = document.getElementById('subtitle');
+  const finalScoreEl = document.getElementById('finalScore');
+  const hintEl = document.getElementById('hint');
+
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let W = 0, H = 0, groundY = 0;
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    groundY = H * 0.72;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const HIGH_KEY = 'pulseRunnerHighScore';
+  let highScore = Number(localStorage.getItem(HIGH_KEY) || 0);
+  bestEl.textContent = 'BEST ' + highScore;
+
+  const STATE = { READY: 0, PLAYING: 1, DEAD: 2 };
+  let state = STATE.READY;
+
+  const GRAVITY = 2600;
+  const MAX_CHARGE = 0.55;
+  const MIN_JUMP_V = 620;
+  const MAX_JUMP_V = 1180;
+  const PLAYER_R = 15;
+
+  let player, obstacles, orbs, particles, bgLines;
+  let baseSpeed, speed, distance, score, comboMult, comboCount, comboTimer;
+  let holding, holdStart, spawnTimer, orbTimer, shakeTime, shakeMag, elapsed;
+
+  function resetGame() {
+    player = {
+      x: Math.max(90, W * 0.16),
+      y: groundY - PLAYER_R,
+      vy: 0,
+      onGround: true,
+      squash: 1,
+    };
+    obstacles = [];
+    orbs = [];
+    particles = [];
+    baseSpeed = 420;
+    speed = baseSpeed;
+    distance = 0;
+    score = 0;
+    comboMult = 1;
+    comboCount = 0;
+    comboTimer = 0;
+    holding = false;
+    holdStart = 0;
+    spawnTimer = 0.9;
+    orbTimer = 1.6;
+    shakeTime = 0;
+    shakeMag = 0;
+    elapsed = 0;
+
+    bgLines = [];
+    for (let i = 0; i < 3; i++) {
+      const lane = [];
+      const count = 26;
+      for (let j = 0; j < count; j++) {
+        lane.push({ x: (W / count) * j, w: 2 + i * 1.5 });
+      }
+      bgLines.push({ items: lane, speedMult: 0.15 + i * 0.22, y: groundY + 20 + i * 26, alpha: 0.06 + i * 0.05 });
+    }
+  }
+
+  function spawnObstacle() {
+    const kind = Math.random() < 0.22 ? 'wide' : 'spike';
+    if (kind === 'spike') {
+      const h = 34 + Math.random() * 30;
+      obstacles.push({ type: 'spike', x: W + 40, w: 26, h, y: groundY });
+    } else {
+      const h = 30 + Math.random() * 18;
+      const w = 70 + Math.random() * 50;
+      obstacles.push({ type: 'wide', x: W + 40, w, h, y: groundY });
+    }
+  }
+
+  function spawnOrb() {
+    const height = 60 + Math.random() * 140;
+    orbs.push({ x: W + 40, y: groundY - height, r: 9, collected: false, phase: Math.random() * Math.PI * 2 });
+  }
+
+  function addParticles(x, y, color, n, spread, speedMin, speedMax) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = speedMin + Math.random() * (speedMax - speedMin);
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * s * (0.3 + Math.random() * 0.7) * (spread ? 1 : 0.4),
+        vy: Math.sin(a) * s - 60,
+        life: 0.4 + Math.random() * 0.5,
+        age: 0,
+        color,
+        size: 1.5 + Math.random() * 2.6,
+      });
+    }
+  }
+
+  function triggerShake(mag, dur) {
+    shakeMag = mag;
+    shakeTime = dur;
+  }
+
+  function startGame() {
+    resetGame();
+    state = STATE.PLAYING;
+    overlay.classList.add('hidden');
+    comboEl.style.opacity = 0;
+  }
+
+  function endGame() {
+    state = STATE.DEAD;
+    triggerShake(14, 0.35);
+    addParticles(player.x, player.y, '#f637ec', 40, true, 120, 420);
+    const finalScoreVal = Math.floor(score);
+    const isBest = finalScoreVal > highScore;
+    if (isBest) {
+      highScore = finalScoreVal;
+      localStorage.setItem(HIGH_KEY, String(highScore));
+    }
+    bestEl.textContent = 'BEST ' + highScore;
+    subtitleEl.style.display = 'none';
+    finalScoreEl.textContent = isBest
+      ? `New best — ${finalScoreVal} pts!`
+      : `Score ${finalScoreVal} — best ${highScore}`;
+    hintEl.textContent = 'TAP OR PRESS SPACE TO TRY AGAIN';
+    setTimeout(() => overlay.classList.remove('hidden'), 260);
+  }
+
+  function beginHold() {
+    if (state === STATE.READY) { startGame(); return; }
+    if (state === STATE.DEAD) {
+      subtitleEl.style.display = '';
+      startGame();
+      return;
+    }
+    if (state === STATE.PLAYING && player.onGround && !holding) {
+      holding = true;
+      holdStart = elapsed;
+    }
+  }
+
+  function releaseHold() {
+    if (state !== STATE.PLAYING || !holding) return;
+    holding = false;
+    const charge = Math.min(elapsed - holdStart, MAX_CHARGE) / MAX_CHARGE;
+    const v = MIN_JUMP_V + (MAX_JUMP_V - MIN_JUMP_V) * charge;
+    player.vy = -v;
+    player.onGround = false;
+    player.squash = 1.4;
+    addParticles(player.x, player.y + PLAYER_R, '#4deeea', 14, false, 40, 160);
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); beginHold(); }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); releaseHold(); }
+  });
+  canvas.addEventListener('pointerdown', (e) => { e.preventDefault(); beginHold(); });
+  window.addEventListener('pointerup', () => releaseHold());
+  window.addEventListener('blur', () => releaseHold());
+
+  function rectsOverlapCircle(cx, cy, cr, rx, ry, rw, rh) {
+    const nx = Math.max(rx, Math.min(cx, rx + rw));
+    const ny = Math.max(ry, Math.min(cy, ry + rh));
+    const dx = cx - nx, dy = cy - ny;
+    return dx * dx + dy * dy < cr * cr;
+  }
+
+  function update(dt) {
+    elapsed += dt;
+
+    if (state !== STATE.PLAYING) {
+      updateParticles(dt);
+      return;
+    }
+
+    distance += speed * dt;
+    score = distance * 0.05;
+    speed = baseSpeed + Math.min(distance * 0.045, 420);
+
+    if (holding) {
+      player.squash = 1 + Math.min((elapsed - holdStart) / MAX_CHARGE, 1) * 0.35;
+    }
+
+    player.vy += GRAVITY * dt;
+    player.y += player.vy * dt;
+    if (player.y >= groundY - PLAYER_R) {
+      if (!player.onGround && player.vy > 300) {
+        addParticles(player.x, groundY, '#4deeea', 10, false, 30, 120);
+      }
+      player.y = groundY - PLAYER_R;
+      player.vy = 0;
+      player.onGround = true;
+    }
+    player.squash += (1 - player.squash) * Math.min(dt * 10, 1);
+
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      spawnObstacle();
+      const gapReduction = Math.min(distance * 0.0009, 0.55);
+      spawnTimer = Math.max(0.55, 1.35 - gapReduction) + Math.random() * 0.35;
+    }
+
+    orbTimer -= dt;
+    if (orbTimer <= 0) {
+      spawnOrb();
+      orbTimer = 1.4 + Math.random() * 1.4;
+    }
+
+    for (const o of obstacles) o.x -= speed * dt;
+    while (obstacles.length && obstacles[0].x + obstacles[0].w < -20) obstacles.shift();
+
+    for (const o of orbs) o.x -= speed * dt;
+    while (orbs.length && orbs[0].x < -20) orbs.shift();
+
+    for (const lane of bgLines) {
+      for (const item of lane.items) {
+        item.x -= speed * dt * lane.speedMult;
+        if (item.x < -20) item.x += W + 20;
+      }
+    }
+
+    for (const ob of obstacles) {
+      const topY = ob.y - ob.h;
+      if (rectsOverlapCircle(player.x, player.y, PLAYER_R * 0.85, ob.x, topY, ob.w, ob.h)) {
+        endGame();
+        break;
+      }
+    }
+
+    for (const orb of orbs) {
+      if (orb.collected) continue;
+      const dx = player.x - orb.x, dy = player.y - orb.y;
+      if (dx * dx + dy * dy < (PLAYER_R + orb.r) * (PLAYER_R + orb.r)) {
+        orb.collected = true;
+        comboCount++;
+        comboMult = 1 + Math.min(Math.floor(comboCount / 3), 4);
+        comboTimer = 2.2;
+        score += 15 * comboMult;
+        addParticles(orb.x, orb.y, '#ffd166', 16, true, 60, 240);
+        triggerShake(2, 0.08);
+      }
+    }
+    orbs = orbs.filter(o => !o.collected);
+
+    if (comboTimer > 0) {
+      comboTimer -= dt;
+      comboEl.style.opacity = 1;
+      comboEl.textContent = `COMBO x${comboMult}`;
+      if (comboTimer <= 0) {
+        comboMult = 1;
+        comboCount = 0;
+        comboEl.style.opacity = 0;
+      }
+    }
+
+    if (shakeTime > 0) shakeTime = Math.max(0, shakeTime - dt);
+
+    updateParticles(dt);
+
+    scoreEl.textContent = Math.floor(score);
+  }
+
+  function updateParticles(dt) {
+    for (const p of particles) {
+      p.age += dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 700 * dt;
+    }
+    particles = particles.filter(p => p.age < p.life);
+  }
+
+  function draw() {
+    ctx.save();
+    if (shakeTime > 0) {
+      const m = shakeMag * (shakeTime / 0.35);
+      ctx.translate((Math.random() - 0.5) * m, (Math.random() - 0.5) * m);
+    }
+
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0d1224');
+    g.addColorStop(1, '#050609');
+    ctx.fillStyle = g;
+    ctx.fillRect(-20, -20, W + 40, H + 40);
+
+    for (const lane of bgLines) {
+      ctx.strokeStyle = `rgba(77,238,234,${lane.alpha})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (const item of lane.items) {
+        ctx.moveTo(item.x, lane.y);
+        ctx.lineTo(item.x + item.w * 6, lane.y);
+      }
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = 'rgba(77,238,234,0.28)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, groundY + 1);
+    ctx.lineTo(W, groundY + 1);
+    ctx.stroke();
+
+    for (const ob of obstacles) {
+      const topY = ob.y - ob.h;
+      ctx.fillStyle = 'rgba(246,55,236,0.16)';
+      ctx.shadowColor = '#f637ec';
+      ctx.shadowBlur = 18;
+      if (ob.type === 'spike') {
+        ctx.beginPath();
+        ctx.moveTo(ob.x, ob.y);
+        ctx.lineTo(ob.x + ob.w / 2, topY);
+        ctx.lineTo(ob.x + ob.w, ob.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#f637ec';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      } else {
+        const r = 6;
+        ctx.beginPath();
+        ctx.moveTo(ob.x + r, topY);
+        ctx.arcTo(ob.x + ob.w, topY, ob.x + ob.w, ob.y, r);
+        ctx.arcTo(ob.x + ob.w, ob.y, ob.x, ob.y, r);
+        ctx.arcTo(ob.x, ob.y, ob.x, topY, r);
+        ctx.arcTo(ob.x, topY, ob.x + ob.w, topY, r);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#f637ec';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    }
+
+    for (const orb of orbs) {
+      const bob = Math.sin(elapsed * 4 + orb.phase) * 4;
+      ctx.beginPath();
+      ctx.arc(orb.x, orb.y + bob, orb.r, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd166';
+      ctx.shadowColor = '#ffd166';
+      ctx.shadowBlur = 20;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    for (const p of particles) {
+      const t = 1 - p.age / p.life;
+      ctx.globalAlpha = Math.max(t, 0);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * t, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    if (player) {
+      ctx.save();
+      ctx.translate(player.x, player.y);
+      ctx.scale(1 / player.squash, player.squash);
+      ctx.beginPath();
+      ctx.arc(0, 0, PLAYER_R, 0, Math.PI * 2);
+      ctx.fillStyle = '#4deeea';
+      ctx.shadowColor = '#4deeea';
+      ctx.shadowBlur = 26;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.restore();
+
+      if (holding && state === STATE.PLAYING) {
+        const charge = Math.min((elapsed - holdStart) / MAX_CHARGE, 1);
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, PLAYER_R + 8, -Math.PI / 2, -Math.PI / 2 + charge * Math.PI * 2);
+        ctx.strokeStyle = '#ffd166';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  let lastTime = performance.now();
+  function loop(now) {
+    const dt = Math.min((now - lastTime) / 1000, 0.033);
+    lastTime = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  resetGame();
+  draw();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
